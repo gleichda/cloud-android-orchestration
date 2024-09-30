@@ -1,5 +1,6 @@
 /cvdr
 /cloud_orchestrator
+/terraform/build-and-deploy.sh
 
 tags
 
