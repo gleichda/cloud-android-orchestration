@@ -93,7 +93,7 @@ resource "google_iap_client" "project_client" {
 }
 
 resource "google_iap_web_backend_service_iam_member" "member" {
-  for_each            = var.service_accessors
+  for_each            = setunion([google_service_account.service_account.member], var.service_accessors)
   project             = var.project_id
   web_backend_service = module.lb-http.backend_services.default.name
   role                = "roles/iap.httpsResourceAccessor"
