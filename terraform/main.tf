@@ -48,6 +48,11 @@ resource "google_project_service_identity" "iap" {
 data "google_project" "project" {
 }
 
+resource "google_compute_project_metadata_item" "disable-oslogin" {
+  key   = "enable-oslogin"
+  value = "FALSE"
+}
+
 resource "google_artifact_registry_repository" "my-repo" {
   location      = var.region
   repository_id = var.artifact_repository_id
