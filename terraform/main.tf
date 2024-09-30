@@ -70,8 +70,12 @@ resource "google_secret_manager_secret" "co-config" {
 }
 
 resource "google_secret_manager_secret_version" "secret-version-basic" {
-  secret      = google_secret_manager_secret.co-config.id
-  secret_data = templatefile("conf.toml.tmpl", { PROJECT_ID = var.project_id })
+  secret = google_secret_manager_secret.co-config.id
+  secret_data = templatefile("conf.toml.tmpl", {
+    PROJECT_ID = var.project_id,
+    NETWORK    = google_compute_network.network.id,
+    SUBNETWORK = google_compute_subnetwork.subnetwork.id
+  })
 }
 
 resource "google_iap_brand" "project_brand" {
@@ -169,11 +173,18 @@ resource "google_project_iam_member" "member" {
 
 # Networking
 resource "google_compute_network" "network" {
-  name                    = "default"
-  auto_create_subnetworks = true
+  name                    = "co-network"
+  auto_create_subnetworks = false
   depends_on = [
     google_project_service.apis
   ]
+}
+
+resource "google_compute_subnetwork" "subnetwork" {
+  name          = "test-subnetwork"
+  ip_cidr_range = "10.2.0.0/16"
+  region        = var.region
+  network       = google_compute_network.network.id
 }
 
 resource "google_vpc_access_connector" "connector" {
