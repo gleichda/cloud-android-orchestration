@@ -77,9 +77,10 @@ resource "google_secret_manager_secret" "co-config" {
 resource "google_secret_manager_secret_version" "secret-version-basic" {
   secret = google_secret_manager_secret.co-config.id
   secret_data = templatefile("conf.toml.tmpl", {
-    PROJECT_ID = var.project_id,
-    NETWORK    = google_compute_network.network.id,
-    SUBNETWORK = google_compute_subnetwork.subnetwork.id
+    PROJECT_ID      = var.project_id,
+    NETWORK         = google_compute_network.network.id,
+    SUBNETWORK      = google_compute_subnetwork.subnetwork.id
+    USE_PRIVATE_IPS = var.use_private_ips
   })
 }
 
@@ -196,6 +197,17 @@ resource "google_vpc_access_connector" "connector" {
   region        = var.region
   name          = var.serverless_connector_name
   ip_cidr_range = "10.8.0.0/28"
+  network       = google_compute_network.network.id
+}
+
+module "cloud-nat" {
+  for_each      = var.use_private_ips ? [1] : []
+  source        = "terraform-google-modules/cloud-nat/google"
+  version       = "~> 5.0"
+  project_id    = var.project_id
+  region        = var.region
+  router        = "cloud-nat-${var.region}"
+  create_router = true
   network       = google_compute_network.network.id
 }
 

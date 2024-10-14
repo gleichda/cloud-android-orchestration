@@ -63,3 +63,9 @@ variable "serverless_connector_name" {
   type        = string
   default     = "co-vpc-connector"
 }
+
+variable "use_private_ips" {
+  description = "Toggle to use private IPs in GCP"
+  type        = bool
+  default     = true
+}
