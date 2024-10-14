@@ -98,8 +98,15 @@ resource "google_iap_client" "project_client" {
   brand        = google_iap_brand.project_brand.name
 }
 
+resource "google_iap_web_backend_service_iam_member" "sa_member" {
+  project             = var.project_id
+  web_backend_service = module.lb-http.backend_services.default.name
+  role                = "roles/iap.httpsResourceAccessor"
+  member              = google_service_account.service_account.member
+}
+
 resource "google_iap_web_backend_service_iam_member" "member" {
-  for_each            = setunion([google_service_account.service_account.member], var.service_accessors)
+  for_each            = var.service_accessors
   project             = var.project_id
   web_backend_service = module.lb-http.backend_services.default.name
   role                = "roles/iap.httpsResourceAccessor"
@@ -163,6 +170,13 @@ resource "google_service_account" "service_account" {
   depends_on = [
     google_project_service.apis
   ]
+}
+
+resource "google_service_account_iam_member" "token_creators" {
+  for_each           = var.service_accessors
+  service_account_id = google_service_account.service_account.id
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = each.key
 }
 
 resource "google_secret_manager_secret_iam_member" "member" {
