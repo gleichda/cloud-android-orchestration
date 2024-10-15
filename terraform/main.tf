@@ -215,7 +215,7 @@ resource "google_vpc_access_connector" "connector" {
 }
 
 module "cloud-nat" {
-  for_each      = var.use_private_ips ? [1] : []
+  for_each      = var.use_private_ips ? toset(["1"]) : toset([])
   source        = "terraform-google-modules/cloud-nat/google"
   version       = "~> 5.0"
   project_id    = var.project_id
