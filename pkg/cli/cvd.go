@@ -29,6 +29,7 @@ import (
 	"github.com/google/cloud-android-orchestration/pkg/client"
 
 	hoapi "github.com/google/android-cuttlefish/frontend/src/host_orchestrator/api/v1"
+	hoclient "github.com/google/android-cuttlefish/frontend/src/libhoclient"
 	"github.com/hashicorp/go-multierror"
 )
 
@@ -105,6 +106,7 @@ type CreateCVDOpts struct {
 	// If true, perform the ADB connection automatically.
 	AutoConnect               bool
 	BuildAPICredentialsSource string
+	BuildAPIUserProjectID     string
 	CreateCVDLocalOpts
 }
 
@@ -113,6 +115,12 @@ func (o *CreateCVDOpts) AdditionalInstancesNum() uint32 {
 		return 0
 	}
 	return uint32(o.NumInstances - 1)
+}
+
+func (o *CreateCVDOpts) Update(s *Service) {
+	if s.BuildAPICredentialsSource != "" {
+		o.BuildAPICredentialsSource = s.BuildAPICredentialsSource
+	}
 }
 
 func createCVD(service client.Service, createOpts CreateCVDOpts, statePrinter *statePrinter) ([]*RemoteCVD, error) {
@@ -131,7 +139,7 @@ func createCVD(service client.Service, createOpts CreateCVDOpts, statePrinter *s
 	return result, nil
 }
 
-type CredentialsFactory func() string
+type CredentialsFactory func() hoclient.BuildAPICredential
 
 type cvdCreator struct {
 	service            client.Service
@@ -141,7 +149,7 @@ type cvdCreator struct {
 }
 
 func newCVDCreator(service client.Service, opts CreateCVDOpts, statePrinter *statePrinter) (*cvdCreator, error) {
-	cf, err := credentialsFactoryFromSource(opts.BuildAPICredentialsSource)
+	cf, err := credentialsFactoryFromSource(opts.BuildAPICredentialsSource, opts.BuildAPIUserProjectID)
 	if err != nil {
 		return nil, err
 	}
@@ -350,12 +358,17 @@ func (c *cvdCreator) createCVDFromLocalSrcs() ([]*hoapi.CVD, error) {
 	return res.CVDs, nil
 }
 
-func credentialsFactoryFromSource(source string) (CredentialsFactory, error) {
+func credentialsFactoryFromSource(source string, projectID string) (CredentialsFactory, error) {
 	switch source {
 	case NoneCredentialsSource:
-		return func() string { return "" }, nil
+		return func() hoclient.BuildAPICredential { return hoclient.BuildAPICredential{} }, nil
 	case InjectedCredentialsSource:
-		return func() string { return client.InjectedCredentials }, nil
+		if projectID != "" {
+			return nil, fmt.Errorf("project ID is not supported with injected credentials")
+		}
+		return func() hoclient.BuildAPICredential {
+			return hoclient.BuildAPICredential{AccessToken: client.InjectedCredentials}
+		}, nil
 	default:
 		// expected: `(jwt|oauth):/dir/credentialFile`
 		strs := strings.SplitN(source, ":", 2)
@@ -363,7 +376,13 @@ func credentialsFactoryFromSource(source string) (CredentialsFactory, error) {
 			return nil, fmt.Errorf("unknown credential type, only accept: `none`/`injected`/`%s:'<filepath>'`/`%s:'<filepath>'`", jwtAuthType, oauthAuthType)
 		}
 		authType, filepath := strs[0], strs[1]
-		return accessToken(authType, filepath)
+		token, err := accessToken(authType, filepath)
+		if err != nil {
+			return nil, fmt.Errorf("retrieve access token error: %w", err)
+		}
+		return func() hoclient.BuildAPICredential {
+			return hoclient.BuildAPICredential{AccessToken: token, UserProjectID: projectID}
+		}, nil
 	}
 }
 
@@ -372,26 +391,26 @@ const (
 	oauthAuthType = "oauth"
 )
 
-func accessToken(authType string, filepath string) (func() string, error) {
+func accessToken(authType string, filepath string) (string, error) {
 	content, err := os.ReadFile(filepath)
 	if err != nil {
-		return nil, fmt.Errorf("cannot read content from credential filepath %s: %w", filepath, err)
+		return "", fmt.Errorf("cannot read content from credential filepath %s: %w", filepath, err)
 	}
 	switch authType {
 	case jwtAuthType:
 		tk, err := authz.JWTAccessToken(content)
 		if err != nil {
-			return nil, err
+			return "", err
 		}
-		return func() string { return tk.AccessToken }, nil
+		return tk.AccessToken, nil
 	case oauthAuthType:
 		tk, err := authz.OAuthAccessToken(content)
 		if err != nil {
-			return nil, err
+			return "", err
 		}
-		return func() string { return tk.AccessToken }, nil
+		return tk.AccessToken, nil
 	default:
-		return nil, fmt.Errorf("unknown authType, get '%s' (expected: '%s' or '%s')", authType, jwtAuthType, oauthAuthType)
+		return "", fmt.Errorf("unknown authType, get '%s' (expected: '%s' or '%s')", authType, jwtAuthType, oauthAuthType)
 	}
 }
 
@@ -606,7 +625,7 @@ func envVar(name string) (string, error) {
 	return os.Getenv(name), nil
 }
 
-func uploadFiles(srv client.HostOrchestratorService, uploadDir string, names []string, statePrinter *statePrinter) error {
+func uploadFiles(srv hoclient.HostOrchestratorService, uploadDir string, names []string, statePrinter *statePrinter) error {
 	extractOps := []string{}
 	for _, name := range names {
 		state := fmt.Sprintf("Uploading %q", filepath.Base(name))

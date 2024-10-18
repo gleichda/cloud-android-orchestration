@@ -96,26 +96,27 @@ const (
 )
 
 const (
-	branchFlag                = "branch"
-	buildIDFlag               = "build_id"
-	buildTargetFlag           = "build_target"
-	localImageFlag            = "local_image"
-	kernelBranchFlag          = "kernel_branch"
-	kernelBuildIDFlag         = "kernel_build_id"
-	kernelBuildTargetFlag     = "kernel_build_target"
-	bootloaderBranchFlag      = "bootloader_branch"
-	bootloaderBuildIDFlag     = "bootloader_build_id"
-	bootloaderBuildTargetFlag = "bootloader_build_target"
-	systemImgBranchFlag       = "system_branch"
-	systemImgBuildIDFlag      = "system_build_id"
-	systemImgBuildTargetFlag  = "system_build_target"
-	numInstancesFlag          = "num_instances"
-	autoConnectFlag           = "auto_connect"
-	credentialsSourceFlag     = "credentials_source"
-	localBootloaderSrcFlag    = "local_bootloader_src"
-	localCVDHostPkgSrcFlag    = "local_cvd_host_pkg_src"
-	localImagesSrcsFlag       = "local_images_srcs"
-	localImagesZipSrcFlag     = "local_images_zip_src"
+	branchFlag                 = "branch"
+	buildIDFlag                = "build_id"
+	buildTargetFlag            = "build_target"
+	localImageFlag             = "local_image"
+	kernelBranchFlag           = "kernel_branch"
+	kernelBuildIDFlag          = "kernel_build_id"
+	kernelBuildTargetFlag      = "kernel_build_target"
+	bootloaderBranchFlag       = "bootloader_branch"
+	bootloaderBuildIDFlag      = "bootloader_build_id"
+	bootloaderBuildTargetFlag  = "bootloader_build_target"
+	systemImgBranchFlag        = "system_branch"
+	systemImgBuildIDFlag       = "system_build_id"
+	systemImgBuildTargetFlag   = "system_build_target"
+	numInstancesFlag           = "num_instances"
+	autoConnectFlag            = "auto_connect"
+	buildAPICredsSourceFlag    = "build_api_creds_source"
+	buildAPICredsUserProjectID = "build_api_creds_user_project_id"
+	localBootloaderSrcFlag     = "local_bootloader_src"
+	localCVDHostPkgSrcFlag     = "local_cvd_host_pkg_src"
+	localImagesSrcsFlag        = "local_images_srcs"
+	localImagesZipSrcFlag      = "local_images_zip_src"
 )
 
 const (
@@ -189,6 +190,7 @@ type CreateCVDFlags struct {
 
 func (f *CreateCVDFlags) Update(s *Service) {
 	f.ServiceFlags.Update(s)
+	f.CreateCVDOpts.Update(s)
 	f.CreateHostOpts.Update(s)
 }
 
@@ -565,9 +567,14 @@ func cvdCommands(opts *subCommandOpts) []*cobra.Command {
 		"Automatically connect through ADB after device is created.")
 	create.Flags().StringVar(
 		&createFlags.BuildAPICredentialsSource,
-		credentialsSourceFlag,
+		buildAPICredsSourceFlag,
 		"none",
 		"Source for the Build API OAuth2 credentials")
+	create.Flags().StringVar(
+		&createFlags.BuildAPIUserProjectID,
+		buildAPICredsUserProjectID,
+		"",
+		"Project ID for user accessing the fetch APIs")
 	// Local artifact sources
 	create.Flags().StringVar(&createFlags.LocalBootloaderSrc, localBootloaderSrcFlag, "", "Local bootloader source")
 	create.Flags().StringVar(&createFlags.LocalCVDHostPkgSrc, localCVDHostPkgSrcFlag, "", "Local cvd host package source")
