@@ -29,12 +29,6 @@ import (
 	"github.com/hashicorp/go-multierror"
 )
 
-const (
-	// Value to pass as credentials to the Host Orchestrator service endpoints. Any non-empty value is enough.
-	InjectedCredentials             = "inject"
-	headerNameCOInjectBuildAPICreds = "X-Cutf-Cloud-Orchestrator-Inject-BuildAPI-Creds"
-)
-
 type ApiCallError struct {
 	Code     int    `json:"code,omitempty"`
 	ErrorMsg string `json:"error,omitempty"`
@@ -67,7 +61,7 @@ type HTTPBasic struct {
 	Username string
 }
 
-type ServiceOptions struct {
+type ClientOptions struct {
 	RootEndpoint        string
 	ProxyURL            string
 	DumpOut             io.Writer
@@ -77,7 +71,7 @@ type ServiceOptions struct {
 	InjectBuildAPICreds bool
 }
 
-type Service interface {
+type Client interface {
 	CreateHost(req *apiv1.CreateHostRequest) (*apiv1.HostInstance, error)
 
 	ListHosts() (*apiv1.ListHostsResponse, error)
@@ -86,17 +80,19 @@ type Service interface {
 
 	HostService(host string) hoclient.HostOrchestratorService
 
-	RootURI() string
+	HostServiceURL(host string) (*url.URL, error)
 }
 
-type serviceImpl struct {
-	*ServiceOptions
+type HostHTTPEndpointResolver interface {
+	Resolve(name string) (*url.URL, error)
+}
+
+type clientImpl struct {
+	*ClientOptions
 	httpHelper hoclient.HTTPHelper
 }
 
-type ServiceBuilder func(opts *ServiceOptions) (Service, error)
-
-func NewService(opts *ServiceOptions) (Service, error) {
+func NewClient(opts *ClientOptions) (Client, error) {
 	helper := hoclient.HTTPHelper{
 		Client:       &http.Client{},
 		RootEndpoint: opts.RootEndpoint,
@@ -117,10 +113,10 @@ func NewService(opts *ServiceOptions) (Service, error) {
 			helper.HTTPBasicUsername = opts.Authn.HTTPBasic.Username
 		}
 	}
-	return &serviceImpl{ServiceOptions: opts, httpHelper: helper}, nil
+	return &clientImpl{ClientOptions: opts, httpHelper: helper}, nil
 }
 
-func (c *serviceImpl) CreateHost(req *apiv1.CreateHostRequest) (*apiv1.HostInstance, error) {
+func (c *clientImpl) CreateHost(req *apiv1.CreateHostRequest) (*apiv1.HostInstance, error) {
 	var op apiv1.Operation
 	if err := c.httpHelper.NewPostRequest("/hosts", req).JSONResDo(&op); err != nil {
 		return nil, err
@@ -146,7 +142,7 @@ func (c *serviceImpl) CreateHost(req *apiv1.CreateHostRequest) (*apiv1.HostInsta
 	return ins, nil
 }
 
-func (c *serviceImpl) ListHosts() (*apiv1.ListHostsResponse, error) {
+func (c *clientImpl) ListHosts() (*apiv1.ListHostsResponse, error) {
 	var res apiv1.ListHostsResponse
 	if err := c.httpHelper.NewGetRequest("/hosts").JSONResDo(&res); err != nil {
 		return nil, err
@@ -154,7 +150,7 @@ func (c *serviceImpl) ListHosts() (*apiv1.ListHostsResponse, error) {
 	return &res, nil
 }
 
-func (c *serviceImpl) DeleteHosts(names []string) error {
+func (c *clientImpl) DeleteHosts(names []string) error {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var merr error
@@ -173,7 +169,7 @@ func (c *serviceImpl) DeleteHosts(names []string) error {
 	return merr
 }
 
-func (c *serviceImpl) waitForOperation(op *apiv1.Operation, res any) error {
+func (c *clientImpl) waitForOperation(op *apiv1.Operation, res any) error {
 	path := "/operations/" + op.Name + "/:wait"
 	retryOpts := hoclient.RetryOptions{
 		StatusCodes: []int{http.StatusServiceUnavailable},
@@ -183,22 +179,25 @@ func (c *serviceImpl) waitForOperation(op *apiv1.Operation, res any) error {
 	return c.httpHelper.NewPostRequest(path, nil).JSONResDoWithRetries(res, retryOpts)
 }
 
-func (s *serviceImpl) RootURI() string {
+func (s *clientImpl) RootURI() string {
 	return s.RootEndpoint
 }
 
-func (s *serviceImpl) HostService(host string) hoclient.HostOrchestratorService {
+func (s *clientImpl) HostService(host string) hoclient.HostOrchestratorService {
 	hs := &hoclient.HostOrchestratorServiceImpl{
 		HTTPHelper: s.httpHelper,
-		// Make the cloud orchestrator inject the credentials instead
-		BuildAPICredentialsHeader: hoclient.DefaultHostOrchestratorCredentialsHeader,
-		ProxyURL:                  s.ProxyURL,
-	}
-	if s.InjectBuildAPICreds {
-		hs.BuildAPICredentialsHeader = headerNameCOInjectBuildAPICreds
+		ProxyURL:   s.ProxyURL,
 	}
 	hs.HTTPHelper.RootEndpoint = s.httpHelper.RootEndpoint + "/hosts/" + host
 	return hs
+}
+
+func (s *clientImpl) HostServiceURL(host string) (*url.URL, error) {
+	res, err := url.Parse(s.httpHelper.RootEndpoint + "/hosts/" + host)
+	if err != nil {
+		return nil, fmt.Errorf("failed parsing host service url: %w", err)
+	}
+	return res, nil
 }
 
 func BuildRootEndpoint(serviceURL, version, zone string) string {
@@ -207,12 +206,4 @@ func BuildRootEndpoint(serviceURL, version, zone string) string {
 		result += "/zones/" + zone
 	}
 	return result
-}
-
-func BuilHostIndexURL(rootEndpoint, host string) string {
-	return fmt.Sprintf("%s/hosts/%s/", rootEndpoint, host)
-}
-
-func BuildCVDLogsURL(rootEndpoint, host, id string) string {
-	return fmt.Sprintf("%s/hosts/%s/cvds/%s/logs/", rootEndpoint, host, id)
 }

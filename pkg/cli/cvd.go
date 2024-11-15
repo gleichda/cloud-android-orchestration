@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,8 +35,7 @@ import (
 )
 
 type RemoteCVDLocator struct {
-	ServiceRootEndpoint string `json:"service_root_endpoint"`
-	Host                string `json:"host"`
+	Host string `json:"host"`
 	// Identifier within the whole fleet.
 	ID string `json:"id"`
 	// Identifier within a group.
@@ -59,20 +59,19 @@ type RemoteCVD struct {
 }
 
 type RemoteHost struct {
-	ServiceRootEndpoint string `json:"service_root_endpoint"`
-	Name                string `json:"host"`
-	CVDs                []*RemoteCVD
+	ServiceURL *url.URL
+	Name       string
+	CVDs       []*RemoteCVD
 }
 
-func NewRemoteCVD(url, host string, cvd *hoapi.CVD) *RemoteCVD {
+func NewRemoteCVD(host string, cvd *hoapi.CVD) *RemoteCVD {
 	return &RemoteCVD{
 		RemoteCVDLocator: RemoteCVDLocator{
-			ServiceRootEndpoint: url,
-			Host:                host,
-			ID:                  cvd.ID(),
-			Name:                cvd.Name,
-			WebRTCDeviceID:      cvd.WebRTCDeviceID,
-			ADBSerial:           cvd.ADBSerial,
+			Host:           host,
+			ID:             cvd.ID(),
+			Name:           cvd.Name,
+			WebRTCDeviceID: cvd.WebRTCDeviceID,
+			ADBSerial:      cvd.ADBSerial,
 		},
 		Status:   cvd.Status,
 		Displays: cvd.Displays,
@@ -100,8 +99,7 @@ type CreateCVDOpts struct {
 	LocalImage      bool
 	// Creates multiple instances. Only relevant if given a single build source.
 	NumInstances int
-	// Structure: https://android.googlesource.com/device/google/cuttlefish/+/8bbd3b9cd815f756f332791d45c4f492b663e493/host/commands/cvd/parser/README.md
-	// Example: https://cs.android.com/android/platform/superproject/main/+/main:device/google/cuttlefish/host/cvd_test_configs/main_phone-main_watch.json;drc=b2e8f4f014abb7f9cb56c0ae199334aacb04542d
+	// TODO(b/378123925): Work with https://github.com/google/android-cuttlefish/blob/main/base/cvd/cuttlefish/host/commands/cvd/cli/parser/load_config.proto
 	EnvConfig map[string]interface{}
 	// If true, perform the ADB connection automatically.
 	AutoConnect               bool
@@ -123,8 +121,8 @@ func (o *CreateCVDOpts) Update(s *Service) {
 	}
 }
 
-func createCVD(service client.Service, createOpts CreateCVDOpts, statePrinter *statePrinter) ([]*RemoteCVD, error) {
-	creator, err := newCVDCreator(service, createOpts, statePrinter)
+func createCVD(srvClient client.Client, createOpts CreateCVDOpts, statePrinter *statePrinter) ([]*RemoteCVD, error) {
+	creator, err := newCVDCreator(srvClient, createOpts, statePrinter)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create cvd: %w", err)
 	}
@@ -134,27 +132,27 @@ func createCVD(service client.Service, createOpts CreateCVDOpts, statePrinter *s
 	}
 	result := []*RemoteCVD{}
 	for _, cvd := range cvds {
-		result = append(result, NewRemoteCVD(service.RootURI(), createOpts.Host, cvd))
+		result = append(result, NewRemoteCVD(createOpts.Host, cvd))
 	}
 	return result, nil
 }
 
-type CredentialsFactory func() hoclient.BuildAPICredential
+type CredentialsFactory func() hoclient.BuildAPICreds
 
 type cvdCreator struct {
-	service            client.Service
+	client             client.Client
 	opts               CreateCVDOpts
 	statePrinter       *statePrinter
 	credentialsFactory CredentialsFactory
 }
 
-func newCVDCreator(service client.Service, opts CreateCVDOpts, statePrinter *statePrinter) (*cvdCreator, error) {
+func newCVDCreator(srvClient client.Client, opts CreateCVDOpts, statePrinter *statePrinter) (*cvdCreator, error) {
 	cf, err := credentialsFactoryFromSource(opts.BuildAPICredentialsSource, opts.BuildAPIUserProjectID)
 	if err != nil {
 		return nil, err
 	}
 	return &cvdCreator{
-		service:            service,
+		client:             srvClient,
 		opts:               opts,
 		statePrinter:       statePrinter,
 		credentialsFactory: cf,
@@ -245,7 +243,7 @@ func (c *cvdCreator) createCVDFromLocalBuild() ([]*hoapi.CVD, error) {
 		return nil, err
 	}
 	names = append(names, filepath.Join(hostOut, CVDHostPackageName))
-	hostSrv := c.service.HostService(c.opts.Host)
+	hostSrv := c.client.HostService(c.opts.Host)
 	uploadDir, err := hostSrv.CreateUploadDir()
 	if err != nil {
 		return nil, err
@@ -279,16 +277,113 @@ func (c *cvdCreator) createCVDFromAndroidCI() ([]*hoapi.CVD, error) {
 }
 
 func (c *cvdCreator) createWithCanonicalConfig() ([]*hoapi.CVD, error) {
+	hostSrv := c.client.HostService(c.opts.Host)
+	envConfig := make(map[string]any)
+	if err := deepCopy(c.opts.EnvConfig, &envConfig); err != nil {
+		return nil, fmt.Errorf("deep copying env config failed: %w", err)
+	}
+	if err := c.uploadFilesAndUpdateEnvConfig(hostSrv, envConfig); err != nil {
+		return nil, fmt.Errorf("failed uploading files from environment config: %w", err)
+	}
 	createReq := &hoapi.CreateCVDRequest{
-		EnvConfig: c.opts.EnvConfig,
+		EnvConfig: envConfig,
 	}
 	c.statePrinter.Print(stateMsgFetchAndStart)
-	res, err := c.service.HostService(c.opts.Host).CreateCVD(createReq, c.credentialsFactory())
+	res, err := hostSrv.CreateCVD(createReq, c.credentialsFactory())
 	c.statePrinter.PrintDone(stateMsgFetchAndStart, err)
 	if err != nil {
 		return nil, err
 	}
 	return res.CVDs, nil
+}
+
+func (c *cvdCreator) uploadFilesAndUpdateEnvConfig(hostSrv hoclient.HostOrchestratorService, config map[string]interface{}) error {
+	if err := c.uploadCVDHostPackageAndUpdateEnvConfig(hostSrv, config); err != nil {
+		return err
+	}
+	return c.uploadImagesAndUpdateEnvConfig(hostSrv, config)
+}
+
+// TODO(b/378123925) Work with https://github.com/google/android-cuttlefish/blob/main/base/cvd/cuttlefish/host/commands/cvd/cli/parser/load_config.proto
+func (c *cvdCreator) uploadCVDHostPackageAndUpdateEnvConfig(hostSrv hoclient.HostOrchestratorService, config map[string]interface{}) error {
+	common, ok := config["common"]
+	if !ok {
+		return nil
+	}
+	commonMap, ok := common.(map[string]any)
+	if !ok {
+		return nil
+	}
+	hostPackage, ok := commonMap["host_package"]
+	if !ok {
+		return nil
+	}
+	if val, ok := hostPackage.(string); ok && !strings.HasPrefix(val, "@ab") {
+		isDir, err := isDirectory(val)
+		if err != nil {
+			return fmt.Errorf("directory test for %q failed: %w", val, err)
+		}
+		if isDir {
+			return fmt.Errorf("uploading directory not supported")
+		}
+		uploadDir, err := hostSrv.CreateUploadDir()
+		if err != nil {
+			return fmt.Errorf("failed creating upload dir: %w", err)
+		}
+		if err := uploadFiles(hostSrv, uploadDir, []string{val}, c.statePrinter); err != nil {
+			return fmt.Errorf("failed uploading %q: %w", val, err)
+		}
+		commonMap["host_package"] = "@user_artifacts/" + uploadDir
+	}
+	return nil
+}
+
+// TODO(b/378123925) Work with https://github.com/google/android-cuttlefish/blob/main/base/cvd/cuttlefish/host/commands/cvd/cli/parser/load_config.proto
+func (c *cvdCreator) uploadImagesAndUpdateEnvConfig(hostSrv hoclient.HostOrchestratorService, config map[string]interface{}) error {
+	instances, ok := config["instances"]
+	if !ok {
+		return nil
+	}
+	instancesArr, ok := instances.([]any)
+	if !ok {
+		return nil
+	}
+	for _, ins := range instancesArr {
+		ins, ok := ins.(map[string]any)
+		if !ok {
+			continue
+		}
+		disk, ok := ins["disk"]
+		if !ok {
+			continue
+		}
+		diskMap, ok := disk.(map[string]any)
+		if !ok {
+			continue
+		}
+		defaultBuild, ok := diskMap["default_build"]
+		if !ok {
+			continue
+		}
+		if val, ok := defaultBuild.(string); ok && !strings.HasPrefix(val, "@ab") {
+			isDir, err := isDirectory(val)
+			if err != nil {
+				return fmt.Errorf("directory test for %q failed: %w", val, err)
+			}
+			if isDir {
+				return fmt.Errorf("uploading directory not supported")
+			}
+			uploadDir, err := hostSrv.CreateUploadDir()
+			if err != nil {
+				return fmt.Errorf("failed creating upload dir: %w", err)
+			}
+			if err := uploadFiles(hostSrv, uploadDir, []string{val}, c.statePrinter); err != nil {
+				return fmt.Errorf("failed uploading %q: %w", val, err)
+			}
+			diskMap["default_build"] = "@user_artifacts/" + uploadDir
+		}
+	}
+	return nil
 }
 
 func (c *cvdCreator) createWithOpts() ([]*hoapi.CVD, error) {
@@ -307,7 +402,7 @@ func (c *cvdCreator) createWithOpts() ([]*hoapi.CVD, error) {
 		AndroidCIBundle: &hoapi.AndroidCIBundle{Build: mainBuild, Type: hoapi.MainBundleType},
 	}
 	c.statePrinter.Print(stateMsgFetchMainBundle)
-	fetchMainBuildRes, err := c.service.HostService(c.opts.Host).FetchArtifacts(fetchReq, c.credentialsFactory())
+	fetchMainBuildRes, err := c.client.HostService(c.opts.Host).FetchArtifacts(fetchReq, c.credentialsFactory())
 	c.statePrinter.PrintDone(stateMsgFetchMainBundle, err)
 	if err != nil {
 		return nil, err
@@ -326,7 +421,7 @@ func (c *cvdCreator) createWithOpts() ([]*hoapi.CVD, error) {
 		AdditionalInstancesNum: c.opts.AdditionalInstancesNum(),
 	}
 	c.statePrinter.Print(stateMsgStartCVD)
-	res, err := c.service.HostService(c.opts.Host).CreateCVD(createReq, c.credentialsFactory())
+	res, err := c.client.HostService(c.opts.Host).CreateCVD(createReq, c.credentialsFactory())
 	c.statePrinter.PrintDone(stateMsgStartCVD, err)
 	if err != nil {
 		return nil, err
@@ -338,7 +433,7 @@ func (c *cvdCreator) createCVDFromLocalSrcs() ([]*hoapi.CVD, error) {
 	if err := c.opts.CreateCVDLocalOpts.validate(); err != nil {
 		return nil, fmt.Errorf("invalid local source: %w", err)
 	}
-	uploadDir, err := c.service.HostService(c.opts.Host).CreateUploadDir()
+	uploadDir, err := c.client.HostService(c.opts.Host).CreateUploadDir()
 	if err != nil {
 		return nil, err
 	}
@@ -346,7 +441,7 @@ func (c *cvdCreator) createCVDFromLocalSrcs() ([]*hoapi.CVD, error) {
 	if err != nil {
 		return nil, err
 	}
-	hostSrv := c.service.HostService(c.opts.Host)
+	hostSrv := c.client.HostService(c.opts.Host)
 	if err := uploadFiles(hostSrv, uploadDir, c.opts.CreateCVDLocalOpts.srcs(), c.statePrinter); err != nil {
 		return nil, err
 	}
@@ -358,17 +453,21 @@ func (c *cvdCreator) createCVDFromLocalSrcs() ([]*hoapi.CVD, error) {
 	return res.CVDs, nil
 }
 
+type coInjectBuildAPICreds struct{}
+
+func (c *coInjectBuildAPICreds) ApplyToHTTPRequest(rb *hoclient.HTTPRequestBuilder) {
+	rb.AddHeader("X-Cutf-Cloud-Orchestrator-Inject-BuildAPI-Creds" /* avoid empty header value */, "inject")
+}
+
 func credentialsFactoryFromSource(source string, projectID string) (CredentialsFactory, error) {
 	switch source {
 	case NoneCredentialsSource:
-		return func() hoclient.BuildAPICredential { return hoclient.BuildAPICredential{} }, nil
+		return func() hoclient.BuildAPICreds { return &hoclient.AccessTokenBuildAPICreds{} }, nil
 	case InjectedCredentialsSource:
 		if projectID != "" {
 			return nil, fmt.Errorf("project ID is not supported with injected credentials")
 		}
-		return func() hoclient.BuildAPICredential {
-			return hoclient.BuildAPICredential{AccessToken: client.InjectedCredentials}
-		}, nil
+		return func() hoclient.BuildAPICreds { return &coInjectBuildAPICreds{} }, nil
 	default:
 		// expected: `(jwt|oauth):/dir/credentialFile`
 		strs := strings.SplitN(source, ":", 2)
@@ -380,8 +479,8 @@ func credentialsFactoryFromSource(source string, projectID string) (CredentialsF
 		if err != nil {
 			return nil, fmt.Errorf("retrieve access token error: %w", err)
 		}
-		return func() hoclient.BuildAPICredential {
-			return hoclient.BuildAPICredential{AccessToken: token, UserProjectID: projectID}
+		return func() hoclient.BuildAPICreds {
+			return &hoclient.AccessTokenBuildAPICreds{AccessToken: token, UserProjectID: projectID}
 		}, nil
 	}
 }
@@ -419,8 +518,8 @@ type cvdListResult struct {
 	Error  error
 }
 
-func listCVDs(service client.Service, controlDir string) ([]*RemoteHost, error) {
-	hl, err := service.ListHosts()
+func listCVDs(srvClient client.Client, controlDir string) ([]*RemoteHost, error) {
+	hl, err := srvClient.ListHosts()
 	if err != nil {
 		return nil, fmt.Errorf("error listing hosts: %w", err)
 	}
@@ -434,7 +533,7 @@ func listCVDs(service client.Service, controlDir string) ([]*RemoteHost, error) 
 		ch := make(chan cvdListResult)
 		chans = append(chans, ch)
 		go func(name string, ch chan<- cvdListResult) {
-			cvds, err := listHostCVDsInner(service, name, statuses)
+			cvds, err := listHostCVDsInner(srvClient, name, statuses)
 			ch <- cvdListResult{Result: cvds, Error: err}
 		}(host, ch)
 	}
@@ -444,30 +543,30 @@ func listCVDs(service client.Service, controlDir string) ([]*RemoteHost, error) 
 		listResult := <-ch
 		if listResult.Error != nil {
 			merr = multierror.Append(merr, fmt.Errorf("lists cvds for host %q failed: %w", hostName, err))
+			continue
+		}
+		srvURL, err := srvClient.HostServiceURL(hostName)
+		if err != nil {
+			merr = multierror.Append(merr, fmt.Errorf("failed getting host service url: %w", err))
+			continue
 		}
 		host := &RemoteHost{
-			ServiceRootEndpoint: service.RootURI(),
-			Name:                hostName,
-			CVDs:                listResult.Result,
+			ServiceURL: srvURL,
+			Name:       hostName,
+			CVDs:       listResult.Result,
 		}
 		result = append(result, host)
 	}
 	return result, merr
 }
 
-func listCVDsSingleHost(service client.Service, controlDir, host string) ([]*RemoteHost, error) {
+func listCVDsSingleHost(srvClient client.Client, controlDir, host string) ([]*RemoteHost, error) {
 	statuses, merr := listCVDConnectionsByHost(controlDir, host)
-	cvds, err := listHostCVDsInner(service, host, statuses)
+	cvds, err := listHostCVDsInner(srvClient, host, statuses)
 	if err != nil {
 		merr = multierror.Append(merr, err)
 	}
-	result := []*RemoteHost{
-		{
-			ServiceRootEndpoint: service.RootURI(),
-			Name:                host,
-			CVDs:                cvds,
-		},
-	}
+	result := []*RemoteHost{{Name: host, CVDs: cvds}}
 	return result, merr
 }
 
@@ -480,14 +579,14 @@ func flattenCVDs(hosts []*RemoteHost) []*RemoteCVD {
 }
 
 // Calling listCVDConnectionsByHost is inefficient, this internal function avoids that for listAllCVDs.
-func listHostCVDsInner(service client.Service, host string, statuses map[RemoteCVDLocator]ConnStatus) ([]*RemoteCVD, error) {
-	cvds, err := service.HostService(host).ListCVDs()
+func listHostCVDsInner(srvClient client.Client, host string, statuses map[RemoteCVDLocator]ConnStatus) ([]*RemoteCVD, error) {
+	cvds, err := srvClient.HostService(host).ListCVDs()
 	if err != nil {
 		return nil, err
 	}
 	ret := make([]*RemoteCVD, len(cvds))
 	for i, c := range cvds {
-		ret[i] = NewRemoteCVD(service.RootURI(), host, c)
+		ret[i] = NewRemoteCVD(host, c)
 		if status, ok := statuses[ret[i].RemoteCVDLocator]; ok {
 			ret[i].ConnStatus = &status
 		}
@@ -495,8 +594,8 @@ func listHostCVDsInner(service client.Service, host string, statuses map[RemoteC
 	return ret, nil
 }
 
-func findCVD(service client.Service, controlDir, host, device string) (*RemoteCVD, error) {
-	cvdHosts, err := listCVDsSingleHost(service, controlDir, host)
+func findCVD(srvClient client.Client, controlDir, host, device string) (*RemoteCVD, error) {
+	cvdHosts, err := listCVDsSingleHost(srvClient, controlDir, host)
 	if err != nil {
 		return nil, fmt.Errorf("error listing CVDs: %w", err)
 	}
@@ -649,4 +748,21 @@ func uploadFiles(srv hoclient.HostOrchestratorService, uploadDir string, names [
 		}
 	}
 	return nil
+}
+
+// Deep copies src to dst using json marshaling.
+func deepCopy(src, dst any) error {
+	b, err := json.Marshal(src)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(b, dst)
+}
+
+func isDirectory(path string) (bool, error) {
+	fileInfo, err := os.Stat(path)
+	if err != nil {
+		return false, err
+	}
+	return fileInfo.IsDir(), nil
 }
