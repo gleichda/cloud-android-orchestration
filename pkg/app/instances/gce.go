@@ -147,6 +147,9 @@ func (m *GCEInstanceManager) CreateHost(zone string, req *apiv1.CreateHostReques
 			labelCreatedBy: user.Username(),
 		},
 	}
+	if req.HostInstance.GCP.BootDiskSizeGB != 0 {
+		payload.Disks[0].InitializeParams.DiskSizeGb = req.HostInstance.GCP.BootDiskSizeGB
+	}
 	if len(req.HostInstance.GCP.AcceleratorConfigs) != 0 {
 		configs := []*compute.AcceleratorConfig{}
 		for _, c := range req.HostInstance.GCP.AcceleratorConfigs {
