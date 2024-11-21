@@ -134,6 +134,7 @@ func (m *GCEInstanceManager) CreateHost(zone string, req *apiv1.CreateHostReques
 					SourceImage: m.Config.GCP.HostImageFamily,
 				},
 				Boot: true,
+				AutoDelete: true,
 			},
 		},
 		NetworkInterfaces: []*compute.NetworkInterface{
