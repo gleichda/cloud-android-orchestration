@@ -12,8 +12,6 @@ type Zone struct {
 type HostInstance struct {
 	// [Output Only] Instance name.
 	Name string `json:"name,omitempty"`
-	// [Output Only] Boot disk size in GB.
-	BootDiskSizeGB int64 `json:"boot_disk_size_gb,omitempty"`
 	// GCP specific properties.
 	GCP *GCPInstance `json:"gcp,omitempty"`
 	// Docker specific properties.
